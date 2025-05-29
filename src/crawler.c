@@ -9,63 +9,24 @@
 #include <libxml/HTMLparser.h>
 #include <libxml/xpath.h>
 #include <libxml/uri.h>
+#include "../include/config.h"
 #include "../include/crawler.h"
+#include "../include/database.h"
 
 char *strdup(const char *s)
 {
+    if (!s)
+        return NULL;
+
     size_t len = strlen(s) + 1;
     char *dup = malloc(len);
-    if (dup)
-    {
-        memcpy(dup, s, len);
-    }
+
+    if (!dup)
+        return NULL;
+
+    strcpy(dup, s);
     return dup;
 }
-
-// Structure to hold downloaded web page content
-typedef struct
-{
-    char *data;
-    size_t size;
-    size_t capacity;
-} WebPage;
-
-// URL queue node for BFS crawling
-typedef struct URLNode
-{
-    char url[MAX_URL_LENGTH];
-    int depth;
-    struct URLNode *next;
-} URLNode;
-
-// URL queue structure
-typedef struct
-{
-    URLNode *front;
-    URLNode *rear;
-    int count;
-} URLQueue;
-
-// Hash table for visited URLs
-typedef struct HashNode
-{
-    char url[MAX_URL_LENGTH];
-    struct HashNode *next;
-} HashNode;
-
-HashNode *visited_urls[HASH_SIZE];
-
-// Statistics
-typedef struct
-{
-    int pages_crawled;
-    int links_found;
-    int errors;
-    int skipped_urls;
-    time_t start_time;
-} CrawlerStats;
-
-CrawlerStats stats = {0};
 
 // Function to create pages directory if it doesn't exist
 int create_pages_directory()
@@ -86,21 +47,6 @@ int create_pages_directory()
     return 1;
 }
 
-// Hash function for URL hash table
-unsigned int hash_url(const char *url)
-{
-    if (!url)
-        return 0;
-
-    unsigned int hash = 5381;
-    int c;
-    while ((c = *url++))
-    {
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash % HASH_SIZE;
-}
-
 // Check if URL should be skipped based on patterns
 int should_skip_url(const char *url)
 {
@@ -117,122 +63,15 @@ int should_skip_url(const char *url)
     return 0;
 }
 
-// Check if URL has been visited
-int is_visited(const char *url)
-{
-    if (!url)
-        return 1;
-
-    unsigned int index = hash_url(url);
-    HashNode *node = visited_urls[index];
-
-    while (node)
-    {
-        if (strcmp(node->url, url) == 0)
-        {
-            return 1;
-        }
-        node = node->next;
-    }
-    return 0;
-}
-
-// Mark URL as visited
-void mark_visited(const char *url)
-{
-    if (!url || is_visited(url))
-        return;
-
-    unsigned int index = hash_url(url);
-    HashNode *new_node = malloc(sizeof(HashNode));
-    if (!new_node)
-    {
-        fprintf(stderr, "Memory allocation failed for visited URL\n");
-        return;
-    }
-
-    strncpy(new_node->url, url, MAX_URL_LENGTH - 1);
-    new_node->url[MAX_URL_LENGTH - 1] = '\0';
-    new_node->next = visited_urls[index];
-    visited_urls[index] = new_node;
-}
-
-// Initialize URL queue
-URLQueue *init_queue()
-{
-    URLQueue *queue = malloc(sizeof(URLQueue));
-    if (!queue)
-        return NULL;
-
-    queue->front = NULL;
-    queue->rear = NULL;
-    queue->count = 0;
-    return queue;
-}
-
-// Add URL to queue
-void enqueue_url(URLQueue *queue, const char *url, int depth)
-{
-    if (!queue || !url || queue->count >= MAX_URLS || depth > MAX_DEPTH)
-    {
-        return;
-    }
-
-    // Skip if URL should be filtered
-    if (should_skip_url(url))
-    {
-        stats.skipped_urls++;
-        if (VERBOSE_OUTPUT)
-        {
-            printf("Skipped URL: %s\n", url);
-        }
-        return;
-    }
-
-    URLNode *new_node = malloc(sizeof(URLNode));
-    if (!new_node)
-    {
-        fprintf(stderr, "Memory allocation failed for URL queue\n");
-        return;
-    }
-
-    strncpy(new_node->url, url, MAX_URL_LENGTH - 1);
-    new_node->url[MAX_URL_LENGTH - 1] = '\0';
-    new_node->depth = depth;
-    new_node->next = NULL;
-
-    if (queue->rear)
-    {
-        queue->rear->next = new_node;
-    }
-    else
-    {
-        queue->front = new_node;
-    }
-    queue->rear = new_node;
-    queue->count++;
-}
-
-// Remove URL from queue
-URLNode *dequeue_url(URLQueue *queue)
-{
-    if (!queue || !queue->front)
-        return NULL;
-
-    URLNode *node = queue->front;
-    queue->front = queue->front->next;
-    if (!queue->front)
-    {
-        queue->rear = NULL;
-    }
-    queue->count--;
-    return node;
-}
-
 // Callback function for libcurl to write received data
 size_t write_callback(void *contents, size_t size, size_t nmemb, WebPage *page)
 {
     size_t real_size = size * nmemb;
+
+    if (!page || !contents)
+    {
+        return 0;
+    }
 
     // Check if we would exceed maximum page size
     if (page->size + real_size > MAX_PAGE_SIZE)
@@ -315,9 +154,9 @@ char *resolve_url(const char *base_url, const char *relative_url)
 }
 
 // Extract links from HTML content
-void extract_links(const char *html, const char *base_url, URLQueue *queue, int current_depth)
+void extract_links(const char *html, const char *base_url, int current_depth)
 {
-    if (!html || !base_url || !queue)
+    if (!html || !base_url)
     {
         return;
     }
@@ -378,10 +217,10 @@ void extract_links(const char *html, const char *base_url, URLQueue *queue, int 
 
                             normalize_url(absolute_url);
 
-                            if (!is_visited(absolute_url) && !should_skip_url(absolute_url))
+                            if (!is_url_visited(absolute_url) && !should_skip_url(absolute_url))
                             {
-                                enqueue_url(queue, absolute_url, current_depth + 1);
-                                stats.links_found++;
+                                add_url_to_queue(absolute_url, current_depth + 1);
+                                save_extracted_link(base_url, absolute_url);
                                 if (VERBOSE_OUTPUT)
                                 {
                                     printf("Found link: %s (depth %d)\n", absolute_url, current_depth + 1);
@@ -402,7 +241,7 @@ void extract_links(const char *html, const char *base_url, URLQueue *queue, int 
 }
 
 // Download and process a single URL
-int crawl_url(const char *url, URLQueue *queue, int depth)
+int crawl_url(const char *url, int depth)
 {
     if (!url)
         return 0;
@@ -456,8 +295,11 @@ int crawl_url(const char *url, URLQueue *queue, int depth)
         stats.pages_crawled++;
         success = 1;
 
+        // Save to database
+        save_page_to_db(url, page.data, page.size, response_code, depth);
+
         // Extract links from the page
-        extract_links(page.data, url, queue, depth);
+        extract_links(page.data, url, depth);
 
         // Save page content if enabled
         if (SAVE_PAGES)
@@ -484,6 +326,9 @@ int crawl_url(const char *url, URLQueue *queue, int depth)
         stats.errors++;
     }
 
+    // Mark URL as crawled in database
+    mark_url_crawled(url);
+
     if (page.data)
         free(page.data);
     curl_easy_cleanup(curl);
@@ -491,69 +336,124 @@ int crawl_url(const char *url, URLQueue *queue, int depth)
     return success;
 }
 
-// Clean up visited URLs hash table
-void cleanup_visited_urls()
-{
-    for (int i = 0; i < HASH_SIZE; i++)
-    {
-        HashNode *node = visited_urls[i];
-        while (node)
-        {
-            HashNode *temp = node;
-            node = node->next;
-            free(temp);
-        }
-        visited_urls[i] = NULL;
-    }
-}
-
-// Clean up URL queue
-void cleanup_queue(URLQueue *queue)
-{
-    if (!queue)
-        return;
-
-    while (queue->front)
-    {
-        URLNode *temp = dequeue_url(queue);
-        if (temp)
-            free(temp);
-    }
-    free(queue);
-}
-
-// Print crawler statistics
-void print_stats()
-{
-    time_t end_time = time(NULL);
-    double elapsed = difftime(end_time, stats.start_time);
-
-    printf("\n=== Crawler Statistics ===\n");
-    printf("Pages crawled: %d\n", stats.pages_crawled);
-    printf("Links found: %d\n", stats.links_found);
-    printf("URLs skipped: %d\n", stats.skipped_urls);
-    printf("Errors: %d\n", stats.errors);
-    printf("Time elapsed: %.2f seconds\n", elapsed);
-    if (elapsed > 0)
-    {
-        printf("Average pages/second: %.2f\n", stats.pages_crawled / elapsed);
-    }
-}
-
 int main(int argc, char *argv[])
 {
-    if (argc != 2)
+    int resume_mode = 0;
+    char *start_url = NULL;
+
+    // Parse command line arguments
+    if (argc == 2)
+    {
+        if (strcmp(argv[1], "--resume") == 0)
+        {
+            resume_mode = 1;
+        }
+        else
+        {
+            start_url = argv[1];
+        }
+    }
+    else if (argc == 3 && strcmp(argv[1], "--resume") == 0)
+    {
+        resume_mode = 1;
+        stats.session_id = atoi(argv[2]);
+    }
+    else if (argc != 2)
     {
         fprintf(stderr, "Usage: %s <starting_url>\n", argv[0]);
-        fprintf(stderr, "Example: %s https://example.com\n", argv[0]);
+        fprintf(stderr, "       %s --resume [session_id]\n", argv[0]);
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  %s https://example.com\n", argv[0]);
+        fprintf(stderr, "  %s --resume\n", argv[0]);
+        fprintf(stderr, "  %s --resume 5\n", argv[0]);
         return 1;
     }
 
-    // Validate starting URL
-    if (strncmp(argv[1], "http://", 7) != 0 && strncmp(argv[1], "https://", 8) != 0)
+    // Validate starting URL if not in resume mode
+    if (!resume_mode && start_url)
     {
-        fprintf(stderr, "Error: URL must start with http:// or https://\n");
+        if (strncmp(start_url, "http://", 7) != 0 && strncmp(start_url, "https://", 8) != 0)
+        {
+            fprintf(stderr, "Error: URL must start with http:// or https://\n");
+            return 1;
+        }
+    }
+
+    // Initialize database
+    if (!init_database())
+    {
+        fprintf(stderr, "Failed to initialize database\n");
         return 1;
+    }
+
+    // Handle resume mode
+    if (resume_mode)
+    {
+        if (stats.session_id == 0)
+        {
+            // Auto-resume latest session
+            stats.session_id = resume_crawl_session();
+            if (stats.session_id == -1)
+            {
+                print_resume_info();
+                cleanup_database();
+                return 1;
+            }
+        }
+
+        // Verify session exists and is active
+        const char *sql = "SELECT start_url, start_time FROM crawl_sessions WHERE id = ? AND status = 'running'";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(crawler_db.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        {
+            fprintf(stderr, "Database error\n");
+            cleanup_database();
+            return 1;
+        }
+
+        sqlite3_bind_int(stmt, 1, stats.session_id);
+        if (sqlite3_step(stmt) != SQLITE_ROW)
+        {
+            fprintf(stderr, "Session %d not found or not active\n", stats.session_id);
+            sqlite3_finalize(stmt);
+            print_resume_info();
+            cleanup_database();
+            return 1;
+        }
+
+        const char *db_url = (const char *)sqlite3_column_text(stmt, 0);
+        start_url = strdup(db_url);
+        if (!start_url)
+        {
+            fprintf(stderr, "Failed to allocate memory for start URL\n");
+            sqlite3_finalize(stmt);
+            cleanup_database();
+            return 1;
+        }
+
+        stats.start_time = sqlite3_column_int64(stmt, 1);
+        sqlite3_finalize(stmt);
+
+        printf("Resuming crawl session %d\n", stats.session_id);
+        printf("Original start URL: %s\n", start_url);
+    }
+    else
+    {
+        // Create new session
+        stats.session_id = create_crawl_session(start_url);
+        if (stats.session_id == -1)
+        {
+            fprintf(stderr, "Failed to create crawl session\n");
+            cleanup_database();
+            return 1;
+        }
+
+        stats.start_time = time(NULL);
+
+        // Add initial URL to queue
+        add_url_to_queue(start_url, 0);
+
+        printf("Starting new crawl session %d\n", stats.session_id);
     }
 
     // Create pages directory if it doesn't exist
@@ -562,43 +462,30 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Failed to create pages directory. Continuing without saving pages.\n");
     }
 
-    // Initialize
-    stats.start_time = time(NULL);
+    // Initialize libraries
     curl_global_init(CURL_GLOBAL_DEFAULT);
-
-    // Initialize libxml2
     xmlInitParser();
     LIBXML_TEST_VERSION;
 
-    URLQueue *queue = init_queue();
-    if (!queue)
-    {
-        fprintf(stderr, "Failed to initialize URL queue\n");
-        curl_global_cleanup();
-        xmlCleanupParser();
-        return 1;
-    }
-
-    // Start crawling
-    printf("Starting web crawler...\n");
-    printf("Starting URL: %s\n", argv[1]);
+    // Start/Resume crawling
+    printf("=====================================\n");
+    printf("Session ID: %d\n", stats.session_id);
+    printf("Start URL: %s\n", start_url);
     printf("Max depth: %d\n", MAX_DEPTH);
     printf("Max URLs: %d\n", MAX_URLS);
     printf("Delay between requests: %d seconds\n", DELAY_SECONDS);
+    printf("Database: %s\n", DB_NAME);
     printf("=====================================\n\n");
 
-    enqueue_url(queue, argv[1], 0);
+    // Main crawling loop
+    char current_url[MAX_URL_LENGTH];
+    int current_depth;
 
-    while (queue->front && stats.pages_crawled < MAX_URLS)
+    while (get_next_url(current_url, &current_depth) && stats.pages_crawled < MAX_URLS)
     {
-        URLNode *current = dequeue_url(queue);
-        if (!current)
-            break;
-
-        if (!is_visited(current->url))
+        if (!is_url_visited(current_url))
         {
-            mark_visited(current->url);
-            crawl_url(current->url, queue, current->depth);
+            crawl_url(current_url, current_depth);
 
             // Add delay between requests
             if (DELAY_SECONDS > 0)
@@ -606,13 +493,20 @@ int main(int argc, char *argv[])
                 sleep(DELAY_SECONDS);
             }
         }
-        free(current);
+        else
+        {
+            mark_url_crawled(current_url);
+        }
     }
 
     // Cleanup
-    cleanup_queue(queue);
-    cleanup_visited_urls();
     print_stats();
+    cleanup_database();
+
+    if (resume_mode && start_url)
+    {
+        free(start_url);
+    }
 
     xmlCleanupParser();
     curl_global_cleanup();

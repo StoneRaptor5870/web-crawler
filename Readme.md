@@ -243,4 +243,5 @@ if (strstr(content_type, "text/html") == NULL) {
 ## Version History
 
 - v1.0: Initial implementation with basic crawling functionality
+- v1.1: Database storage with sqlite
 - Features planned: Multi-threading, robots.txt support, database storage
