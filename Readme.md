@@ -1,6 +1,6 @@
 # Web Crawler in C
 
-A robust web crawler implementation in C that can systematically browse and download web pages while respecting rate limits and avoiding infinite loops.
+A robust multi threaded web crawler implementation in C that can systematically browse and download web pages to SQLITE database while respecting rate limits and avoiding infinite loops.
 
 ## Features
 
@@ -11,7 +11,7 @@ A robust web crawler implementation in C that can systematically browse and down
 - **Rate Limiting**: Polite crawling with configurable delays
 - **Error Handling**: Robust error handling for network and parsing errors
 - **Statistics**: Real-time crawling statistics and performance metrics
-- **Content Saving**: Saves downloaded pages to local files
+- **Content Saving**: Saves downloaded pages to SQLITE database
 - **Memory Management**: Careful memory management to prevent leaks
 
 ## Dependencies
@@ -20,7 +20,7 @@ The crawler requires the following libraries:
 
 - **libcurl**: For HTTP/HTTPS requests
 - **libxml2**: For HTML parsing and link extraction
-- **Standard C libraries**: stdio, stdlib, string, unistd, time
+- **Standard C libraries**: stdio, stdlib, string, unistd, time, pthread
 
 ## Installation
 
@@ -169,11 +169,9 @@ The crawler handles various error conditions:
 
 ## Limitations
 
-- **Single-threaded**: Currently processes one URL at a time
 - **No robots.txt**: Doesn't check robots.txt files (add this for production use)
 - **Limited Content Types**: Only processes HTML content
 - **No JavaScript**: Cannot handle dynamically generated content
-- **Memory Usage**: Keeps all visited URLs in memory
 
 ## Troubleshooting
 
@@ -213,16 +211,6 @@ gdb .bin/webcrawler
 
 ## Extending the Crawler
 
-### Adding Multi-threading
-
-```c
-// Add pthread support for parallel crawling
-#include <pthread.h>
-
-// Create worker threads
-pthread_t workers[NUM_THREADS];
-```
-
 ### Adding robots.txt Support
 
 ```c
@@ -244,4 +232,5 @@ if (strstr(content_type, "text/html") == NULL) {
 
 - v1.0: Initial implementation with basic crawling functionality
 - v1.1: Database storage with sqlite
+- v1.2: Multi-threading functionality with Threadpool using pthread library
 - Features planned: Multi-threading, robots.txt support, database storage

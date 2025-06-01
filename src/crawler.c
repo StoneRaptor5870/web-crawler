@@ -1,3 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,15 +8,30 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <stdarg.h>
 #include <curl/curl.h>
 #include <libxml/HTMLparser.h>
 #include <libxml/xpath.h>
 #include <libxml/uri.h>
+#include <signal.h>
 #include "../include/config.h"
 #include "../include/crawler.h"
 #include "../include/database.h"
+#include "../include/threads.h"
 
-char *strdup(const char *s)
+ThreadPool *thread_pool = NULL;
+pthread_mutex_t db_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t stats_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t console_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Structure to pass URL and depth to worker threads
+typedef struct
+{
+    char *url;
+    int depth;
+} CrawlTask;
+
+char *my_strdup(const char *s)
 {
     if (!s)
         return NULL;
@@ -26,6 +44,72 @@ char *strdup(const char *s)
 
     strcpy(dup, s);
     return dup;
+}
+
+void safe_printf(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+
+    pthread_mutex_lock(&console_mutex);
+    vprintf(format, args);
+    fflush(stdout);
+    pthread_mutex_unlock(&console_mutex);
+
+    va_end(args);
+}
+
+// Database operations
+void safe_save_page_to_db(const char *url, const char *content, size_t content_length,
+                          long response_code, int depth)
+{
+    pthread_mutex_lock(&db_mutex);
+    save_page_to_db(url, content, content_length, response_code, depth);
+    pthread_mutex_unlock(&db_mutex);
+}
+
+void safe_add_url_to_queue(const char *url, int depth)
+{
+    pthread_mutex_lock(&db_mutex);
+    add_url_to_queue(url, depth);
+    pthread_mutex_unlock(&db_mutex);
+}
+
+int safe_is_url_visited(const char *url)
+{
+    pthread_mutex_lock(&db_mutex);
+    int result = is_url_visited(url);
+    pthread_mutex_unlock(&db_mutex);
+    return result;
+}
+
+void safe_mark_url_crawled(const char *url)
+{
+    pthread_mutex_lock(&db_mutex);
+    mark_url_crawled(url);
+    pthread_mutex_unlock(&db_mutex);
+}
+
+void safe_save_extracted_link(const char *source_url, const char *target_url)
+{
+    pthread_mutex_lock(&db_mutex);
+    save_extracted_link(source_url, target_url);
+    pthread_mutex_unlock(&db_mutex);
+}
+
+// Stats update
+void safe_increment_pages_crawled()
+{
+    pthread_mutex_lock(&stats_mutex);
+    stats.pages_crawled++;
+    pthread_mutex_unlock(&stats_mutex);
+}
+
+void safe_increment_errors()
+{
+    pthread_mutex_lock(&stats_mutex);
+    stats.errors++;
+    pthread_mutex_unlock(&stats_mutex);
 }
 
 // Function to create pages directory if it doesn't exist
@@ -141,14 +225,14 @@ char *resolve_url(const char *base_url, const char *relative_url)
     if (strncmp(relative_url, "http://", 7) == 0 ||
         strncmp(relative_url, "https://", 8) == 0)
     {
-        return strdup(relative_url);
+        return my_strdup(relative_url);
     }
 
     xmlChar *resolved = xmlBuildURI((const xmlChar *)relative_url, (const xmlChar *)base_url);
     if (!resolved)
         return NULL;
 
-    char *result = strdup((char *)resolved);
+    char *result = my_strdup((char *)resolved);
     xmlFree(resolved);
     return result;
 }
@@ -168,7 +252,7 @@ void extract_links(const char *html, const char *base_url, int current_depth)
                                     HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING | HTML_PARSE_RECOVER);
     if (!doc)
     {
-        stats.errors++;
+        safe_increment_errors();
         return;
     }
 
@@ -176,7 +260,7 @@ void extract_links(const char *html, const char *base_url, int current_depth)
     if (!context)
     {
         xmlFreeDoc(doc);
-        stats.errors++;
+        safe_increment_errors();
         return;
     }
 
@@ -217,13 +301,14 @@ void extract_links(const char *html, const char *base_url, int current_depth)
 
                             normalize_url(absolute_url);
 
-                            if (!is_url_visited(absolute_url) && !should_skip_url(absolute_url))
+                            if (!safe_is_url_visited(absolute_url) && !should_skip_url(absolute_url))
                             {
-                                add_url_to_queue(absolute_url, current_depth + 1);
-                                save_extracted_link(base_url, absolute_url);
+                                safe_add_url_to_queue(absolute_url, current_depth + 1);
+                                safe_save_extracted_link(base_url, absolute_url);
+
                                 if (VERBOSE_OUTPUT)
                                 {
-                                    printf("Found link: %s (depth %d)\n", absolute_url, current_depth + 1);
+                                    safe_printf("Found link: %s (depth %d)\n", absolute_url, current_depth + 1);
                                 }
                             }
                         }
@@ -246,13 +331,13 @@ int crawl_url(const char *url, int depth)
     if (!url)
         return 0;
 
-    printf("Crawling: %s (depth %d)\n", url, depth);
+    safe_printf("Thread %ld crawling: %s (depth %d)\n", (long)pthread_self(), url, depth);
 
     CURL *curl = curl_easy_init();
     if (!curl)
     {
-        fprintf(stderr, "Failed to initialize curl\n");
-        stats.errors++;
+        safe_printf("Thread %ld: Failed to initialize curl for %s\n", (long)pthread_self(), url);
+        safe_increment_errors();
         return 0;
     }
 
@@ -261,9 +346,9 @@ int crawl_url(const char *url, int depth)
     page.data = malloc(page.capacity);
     if (!page.data)
     {
-        fprintf(stderr, "Failed to allocate initial page buffer\n");
+        safe_printf("Thread %ld: Failed to allocate memory for %s\n", (long)pthread_self(), url);
         curl_easy_cleanup(curl);
-        stats.errors++;
+        safe_increment_errors();
         return 0;
     }
 
@@ -283,20 +368,22 @@ int crawl_url(const char *url, int depth)
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
 
     int success = 0;
-
     if (res != CURLE_OK)
     {
-        fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-        stats.errors++;
+        safe_printf("Thread %ld: curl failed for %s: %s\n",
+                    (long)pthread_self(), url, curl_easy_strerror(res));
+        safe_increment_errors();
     }
     else if (response_code == 200 && page.data && page.size > 0)
     {
-        printf("Successfully downloaded %s (%zu bytes)\n", url, page.size);
-        stats.pages_crawled++;
+        safe_printf("Thread %ld: Successfully downloaded %s (%zu bytes)\n",
+                    (long)pthread_self(), url, page.size);
+
+        safe_increment_pages_crawled();
         success = 1;
 
         // Save to database
-        save_page_to_db(url, page.data, page.size, response_code, depth);
+        safe_save_page_to_db(url, page.data, page.size, response_code, depth);
 
         // Extract links from the page
         extract_links(page.data, url, depth);
@@ -304,36 +391,72 @@ int crawl_url(const char *url, int depth)
         // Save page content if enabled
         if (SAVE_PAGES)
         {
+            static int file_counter = 0;
+            static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+            pthread_mutex_lock(&file_mutex);
+            file_counter++;
             char filename[512];
-            snprintf(filename, sizeof(filename), "pages/%s%d.html", PAGE_FILE_PREFIX, stats.pages_crawled);
+            snprintf(filename, sizeof(filename), "pages/%sthread_%ld_%d.html",
+                     PAGE_FILE_PREFIX, (long)pthread_self(), file_counter);
+            pthread_mutex_unlock(&file_mutex);
+
             FILE *f = fopen(filename, "w");
             if (f)
             {
                 fwrite(page.data, 1, page.size, f);
                 fclose(f);
-                printf("Saved content to %s\n", filename);
-            }
-            else
-            {
-                fprintf(stderr, "Failed to save file %s\n", filename);
-                perror("fopen");
+                safe_printf("Thread %ld: Saved content to %s\n", (long)pthread_self(), filename);
             }
         }
     }
     else
     {
-        printf("HTTP error %ld for %s\n", response_code, url);
-        stats.errors++;
+        safe_printf("Thread %ld: HTTP error %ld for %s\n", (long)pthread_self(), response_code, url);
+        safe_increment_errors();
     }
-
-    // Mark URL as crawled in database
-    mark_url_crawled(url);
 
     if (page.data)
         free(page.data);
     curl_easy_cleanup(curl);
 
     return success;
+}
+
+// Worker function for thread pool
+static void crawl_task_worker(void *arg)
+{
+    CrawlTask *task = (CrawlTask *)arg;
+    if (task)
+    {
+        crawl_url(task->url, task->depth);
+        free(task->url);
+        free(task);
+    }
+}
+
+// Performance monitoring function
+void print_performance_stats()
+{
+    static time_t last_check = 0;
+    static int last_pages_crawled = 0;
+
+    time_t current_time = time(NULL);
+    if (current_time - last_check >= 60)
+    { // Print every 60 seconds
+        pthread_mutex_lock(&stats_mutex);
+        int current_pages = stats.pages_crawled;
+        pthread_mutex_unlock(&stats_mutex);
+
+        if (last_check > 0)
+        {
+            double rate = (double)(current_pages - last_pages_crawled) / (current_time - last_check);
+            safe_printf("Performance: %.2f pages/second (Total: %d pages)\n", rate, current_pages);
+        }
+
+        last_check = current_time;
+        last_pages_crawled = current_pages;
+    }
 }
 
 int main(int argc, char *argv[])
@@ -386,6 +509,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Initialize thread pool
+    safe_printf("Creating thread pool with %d threads\n", MAX_THREADS);
+    thread_pool = thread_pool_create(MAX_THREADS);
+    if (!thread_pool)
+    {
+        fprintf(stderr, "Failed to create thread pool\n");
+        return 1;
+    }
+
     // Handle resume mode
     if (resume_mode)
     {
@@ -422,7 +554,7 @@ int main(int argc, char *argv[])
         }
 
         const char *db_url = (const char *)sqlite3_column_text(stmt, 0);
-        start_url = strdup(db_url);
+        start_url = my_strdup(db_url);
         if (!start_url)
         {
             fprintf(stderr, "Failed to allocate memory for start URL\n");
@@ -480,37 +612,92 @@ int main(int argc, char *argv[])
     // Main crawling loop
     char current_url[MAX_URL_LENGTH];
     int current_depth;
+    int urls_processed = 0;
 
-    while (get_next_url(current_url, &current_depth) && stats.pages_crawled < MAX_URLS)
+    while (stats.pages_crawled < MAX_URLS)
     {
-        if (!is_url_visited(current_url))
-        {
-            crawl_url(current_url, current_depth);
+        // Get next URL with proper locking
+        pthread_mutex_lock(&db_mutex);
+        int has_url = get_next_url(current_url, &current_depth);
 
-            // Add delay between requests
-            if (DELAY_SECONDS > 0)
-            {
-                sleep(DELAY_SECONDS);
-            }
-        }
-        else
+        if (!has_url)
         {
+            pthread_mutex_unlock(&db_mutex);
+            // Wait a bit and check again, or break if no more work
+            usleep(500000); // 0.5 second
+
+            // Check if thread pool is idle and no more URLs
+            pthread_mutex_lock(&db_mutex);
+            int queue_empty = !get_next_url(current_url, &current_depth);
+            pthread_mutex_unlock(&db_mutex);
+
+            if (queue_empty && thread_pool->working_count == 0)
+            {
+                break; // No more work to do
+            }
+            continue;
+        }
+
+        // Check if already visited while holding the lock
+        int already_visited = is_url_visited(current_url);
+        if (!already_visited)
+        {
+            // Mark as visited immediately to prevent other threads from picking it up
             mark_url_crawled(current_url);
         }
+        pthread_mutex_unlock(&db_mutex);
+
+        if (!already_visited)
+        {
+            // Create a task for the thread pool
+            CrawlTask *task = malloc(sizeof(CrawlTask));
+            if (task)
+            {
+                task->url = my_strdup(current_url);
+                task->depth = current_depth;
+
+                if (task->url)
+                {
+                    thread_pool_add_work(thread_pool, crawl_task_worker, task);
+                    urls_processed++;
+
+                    safe_printf("Added URL %d to queue: %s (depth %d)\n",
+                                urls_processed, current_url, current_depth);
+                }
+                else
+                {
+                    free(task);
+                }
+            }
+        }
+
+        print_performance_stats();
+
+        // Small delay to prevent overwhelming the queue
+        usleep(100000); // 0.1 second
     }
+
+    safe_printf("Waiting for all threads to complete...\n");
+    thread_pool_wait(thread_pool);
+    safe_printf("All threads completed!\n");
 
     // Cleanup
     print_stats();
-    cleanup_database();
+    thread_pool_destroy(thread_pool);
+
+    pthread_mutex_destroy(&db_mutex);
+    pthread_mutex_destroy(&stats_mutex);
+    pthread_mutex_destroy(&console_mutex);
 
     if (resume_mode && start_url)
     {
         free(start_url);
     }
 
+    cleanup_database();
     xmlCleanupParser();
     curl_global_cleanup();
 
-    printf("\nCrawling completed!\n");
+    safe_printf("\nCrawling completed!\n");
     return 0;
 }

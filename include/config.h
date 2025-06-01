@@ -23,12 +23,16 @@
 #define MAX_REDIRECTS 5L            // Maximum number of redirects to follow
 #define USER_AGENT "WebCrawler/1.0" // User agent string
 
+// Thread pool settings
+#define MAX_THREADS 4          // Number of worker threads
+#define THREAD_POOL_QUEUE_SIZE 1000 // Maximum queue size
+
 // SSL Settings (for production, set these to 1)
 #define SSL_VERIFY_PEER 0L // Verify SSL certificates (0=disabled, 1=enabled)
 #define SSL_VERIFY_HOST 0L // Verify SSL hostnames (0=disabled, 1=enabled)
 
 // Output Settings
-#define SAVE_PAGES 1             // Save downloaded pages to files (0=no, 1=yes)
+#define SAVE_PAGES 0             // Save downloaded pages to files (0=no, 1=yes)
 #define PAGE_FILE_PREFIX "page_" // Prefix for saved page files
 #define VERBOSE_OUTPUT 1         // Print detailed progress (0=quiet, 1=verbose)
 
